@@ -297,6 +297,344 @@ class VerificationBot(commands.Bot):
         
         await ctx.send(embed=embed)
 
+    @commands.command(name='tutorial')
+    async def tutorial_command(self, ctx):
+        """Complete setup tutorial with step-by-step guide"""
+        embed = discord.Embed(
+            title="📚 Complete Setup Tutorial",
+            description="Follow this step-by-step guide to set up the verification system",
+            color=0x667eea
+        )
+        
+        embed.add_field(
+            name="🚀 Step 1: Initialize the Bot",
+            value="""
+            Run the command: `!setup`
+            This creates your server's unique verification code and sets up the database.
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📝 Step 2: Configure Channels",
+            value="""
+            • Set verification channel: `!set_channel #verification`
+            • Set log channel: `!set_logs #security-logs`
+            
+            The verification channel is where new members will see verification instructions.
+            The log channel is where all security events will be recorded.
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔗 Step 3: Get Your Verification URL",
+            value="""
+            Use `!verification_url` to get your unique verification link.
+            This link will be automatically sent to new members when they join.
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚙️ Step 4: Configure Settings",
+            value="""
+            • Adjust risk threshold: `!config risk_threshold 75`
+            • Enable/disable auto-kick: `!config auto_kick true`
+            • Set welcome message: `!config welcome_message "Welcome!"`
+            • Toggle invite tracking: `!config invite_tracking true`
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🛡️ Step 5: Test the System",
+            value="""
+            1. Create a test invite and join with an alt account
+            2. Complete the verification process
+            3. Check the logs to see if everything is working
+            4. Use `!stats` to view verification statistics
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📊 Monitoring Commands",
+            value="""
+            • `!stats` - View verification statistics
+            • `!check_user @user` - Check specific user's verification
+            • `!settings` - View current server configuration
+            • `!export_data` - Export all verification data (Admin only)
+            """,
+            inline=False
+        )
+        
+        embed.set_footer(text="Need help? Use !help for more commands")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='config')
+    @commands.has_permissions(administrator=True)
+    async def config_command(self, ctx, setting: str = None, value: str = None):
+        """Interactive configuration menu"""
+        guild_id = ctx.guild.id
+        
+        if not setting:
+            # Show configuration menu
+            embed = discord.Embed(
+                title="⚙️ Server Configuration",
+                description="Use `!config <setting> <value>` to change settings",
+                color=0x667eea
+            )
+            
+            # Get current settings
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT verification_channel, log_channel, auto_kick, risk_threshold, 
+                       invite_tracking, welcome_message 
+                FROM server_settings WHERE guild_id = ?
+            ''', (guild_id,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                ver_ch, log_ch, auto_kick, risk_thresh, inv_track, welcome_msg = result
+                
+                embed.add_field(
+                    name="📋 Available Settings",
+                    value=f"""
+                    **verification_channel** - Current: {f'<#{ver_ch}>' if ver_ch else 'Not set'}
+                    **log_channel** - Current: {f'<#{log_ch}>' if log_ch else 'Not set'}
+                    **auto_kick** - Current: {'Enabled' if auto_kick else 'Disabled'}
+                    **risk_threshold** - Current: {risk_thresh}
+                    **invite_tracking** - Current: {'Enabled' if inv_track else 'Disabled'}
+                    **welcome_message** - Current: {welcome_msg or 'Default'}
+                    """,
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="📝 Usage Examples",
+                    value="""
+                    `!config auto_kick false` - Disable auto-kick
+                    `!config risk_threshold 80` - Set risk threshold to 80
+                    `!config welcome_message "Welcome to our server!"` - Set custom welcome
+                    """,
+                    inline=False
+                )
+            
+            await ctx.send(embed=embed)
+            return
+        
+        # Handle specific setting changes
+        setting = setting.lower()
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        if setting == 'auto_kick':
+            auto_kick = value.lower() in ['true', '1', 'yes', 'on', 'enable']
+            cursor.execute(
+                'UPDATE server_settings SET auto_kick = ? WHERE guild_id = ?',
+                (auto_kick, guild_id)
+            )
+            await ctx.send(f"✅ Auto-kick {'enabled' if auto_kick else 'disabled'}")
+            
+        elif setting == 'risk_threshold':
+            try:
+                threshold = int(value)
+                if 0 <= threshold <= 100:
+                    cursor.execute(
+                        'UPDATE server_settings SET risk_threshold = ? WHERE guild_id = ?',
+                        (threshold, guild_id)
+                    )
+                    await ctx.send(f"✅ Risk threshold set to {threshold}")
+                else:
+                    await ctx.send("❌ Risk threshold must be between 0 and 100")
+            except ValueError:
+                await ctx.send("❌ Risk threshold must be a number")
+                
+        elif setting == 'invite_tracking':
+            inv_track = value.lower() in ['true', '1', 'yes', 'on', 'enable']
+            cursor.execute(
+                'UPDATE server_settings SET invite_tracking = ? WHERE guild_id = ?',
+                (inv_track, guild_id)
+            )
+            await ctx.send(f"✅ Invite tracking {'enabled' if inv_track else 'disabled'}")
+            
+        elif setting == 'welcome_message':
+            cursor.execute(
+                'UPDATE server_settings SET welcome_message = ? WHERE guild_id = ?',
+                (value, guild_id)
+            )
+            await ctx.send(f"✅ Welcome message updated")
+            
+        else:
+            await ctx.send("❌ Unknown setting. Use `!config` to see available options.")
+        
+        conn.commit()
+        conn.close()
+
+    @commands.command(name='export_data')
+    async def export_data(self, ctx):
+        """Export all verification data (Owner and whitelisted users only)"""
+        user_id = ctx.author.id
+        
+        # Check if user is owner or whitelisted
+        if user_id != self.owner_id and user_id not in self.whitelisted_users:
+            await ctx.send("❌ You don't have permission to export data. Contact the bot owner for access.")
+            return
+        
+        try:
+            guild_id = ctx.guild.id
+            
+            # Collect all data
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            export_data = {
+                'export_info': {
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'guild_id': guild_id,
+                    'guild_name': ctx.guild.name,
+                    'exported_by': str(ctx.author),
+                    'exported_by_id': user_id
+                },
+                'verifications': [],
+                'blocked_attempts': [],
+                'invite_tracking': [],
+                'server_settings': {}
+            }
+            
+            # Get verifications
+            cursor.execute('''
+                SELECT * FROM verifications WHERE guild_id = ?
+                ORDER BY timestamp DESC
+            ''', (guild_id,))
+            
+            columns = [description[0] for description in cursor.description]
+            for row in cursor.fetchall():
+                verification = dict(zip(columns, row))
+                # Decrypt sensitive data if needed
+                try:
+                    if verification['encrypted_data']:
+                        verification['decrypted_data'] = json.loads(
+                            self.decrypt_data(verification['encrypted_data'])
+                        )
+                except:
+                    verification['decrypted_data'] = 'Failed to decrypt'
+                export_data['verifications'].append(verification)
+            
+            # Get blocked attempts
+            cursor.execute('''
+                SELECT * FROM blocked_attempts WHERE guild_id = ?
+                ORDER BY timestamp DESC
+            ''', (guild_id,))
+            
+            columns = [description[0] for description in cursor.description]
+            for row in cursor.fetchall():
+                export_data['blocked_attempts'].append(dict(zip(columns, row)))
+            
+            # Get invite tracking
+            cursor.execute('''
+                SELECT * FROM invite_tracking WHERE guild_id = ?
+                ORDER BY timestamp DESC
+            ''', (guild_id,))
+            
+            columns = [description[0] for description in cursor.description]
+            for row in cursor.fetchall():
+                export_data['invite_tracking'].append(dict(zip(columns, row)))
+            
+            # Get server settings
+            cursor.execute('''
+                SELECT * FROM server_settings WHERE guild_id = ?
+            ''', (guild_id,))
+            
+            result = cursor.fetchone()
+            if result:
+                columns = [description[0] for description in cursor.description]
+                export_data['server_settings'] = dict(zip(columns, result))
+            
+            conn.close()
+            
+            # Create JSON file
+            json_data = json.dumps(export_data, indent=2, default=str)
+            
+            # Send to user's DMs
+            try:
+                # Create file
+                import io
+                file_buffer = io.StringIO(json_data)
+                file = discord.File(file_buffer, filename=f'verification_data_{guild_id}_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+                
+                embed = discord.Embed(
+                    title="📊 Verification Data Export",
+                    description=f"Complete verification data for **{ctx.guild.name}**",
+                    color=0x00ff00,
+                    timestamp=datetime.datetime.now()
+                )
+                
+                embed.add_field(
+                    name="📈 Statistics",
+                    value=f"""
+                    **Verifications:** {len(export_data['verifications'])}
+                    **Blocked Attempts:** {len(export_data['blocked_attempts'])}
+                    **Invite Tracking:** {len(export_data['invite_tracking'])}
+                    """,
+                    inline=False
+                )
+                
+                embed.set_footer(text="This data is sensitive - handle with care")
+                
+                await ctx.author.send(embed=embed, file=file)
+                await ctx.send("✅ Verification data has been sent to your DMs")
+                
+            except discord.Forbidden:
+                await ctx.send("❌ Could not send data to your DMs. Please enable DMs from server members.")
+            
+        except Exception as e:
+            logger.error(f"Error exporting data: {e}")
+            await ctx.send(f"❌ Error exporting data: {str(e)}")
+
+    @commands.command(name='whitelist')
+    async def whitelist_user(self, ctx, user: discord.Member):
+        """Whitelist a user for data export (Owner only)"""
+        if ctx.author.id != self.owner_id:
+            await ctx.send("❌ Only the bot owner can whitelist users.")
+            return
+        
+        user_id = user.id
+        
+        if user_id in self.whitelisted_users:
+            await ctx.send(f"ℹ️ {user.mention} is already whitelisted.")
+            return
+        
+        # Add to database
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO whitelisted_users (user_id, added_by)
+            VALUES (?, ?)
+        ''', (user_id, ctx.author.id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Add to memory
+        self.whitelisted_users.append(user_id)
+        
+        embed = discord.Embed(
+            title="✅ User Whitelisted",
+            description=f"{user.mention} has been whitelisted for data export",
+            color=0x00ff00
+        )
+        
+        await ctx.send(embed=embed)
+
     @commands.command(name='setup')
     @commands.has_permissions(administrator=True)
     async def setup_server(self, ctx):
@@ -541,21 +879,24 @@ class VerificationBot(commands.Bot):
         if guild_id not in self.server_codes:
             return  # Server not set up
         
-        # Get verification channel
+        # Track invite usage
+        invite_info = await self.track_invite_usage(member)
+        
+        # Get server settings
         conn = sqlite3.connect(self.database_path)
         cursor = conn.cursor()
         
-        cursor.execute(
-            'SELECT verification_channel FROM server_settings WHERE guild_id = ?',
-            (guild_id,)
-        )
+        cursor.execute('''
+            SELECT verification_channel, welcome_message, invite_tracking 
+            FROM server_settings WHERE guild_id = ?
+        ''', (guild_id,))
         result = cursor.fetchone()
         conn.close()
         
         if not result:
             return
         
-        verification_channel_id = result[0]
+        verification_channel_id, welcome_msg, invite_tracking = result
         channel = self.get_channel(verification_channel_id)
         
         if not channel:
@@ -566,7 +907,7 @@ class VerificationBot(commands.Bot):
         
         embed = discord.Embed(
             title=f"🛡️ Welcome {member.display_name}!",
-            description="Please complete verification to access the server",
+            description=welcome_msg or "Please complete verification to access the server",
             color=0x667eea
         )
         
@@ -599,6 +940,14 @@ class VerificationBot(commands.Bot):
             inline=True
         )
         
+        # Add invite info if tracking is enabled
+        if invite_tracking and invite_info:
+            embed.add_field(
+                name="📨 Invited by",
+                value=f"{invite_info['inviter_name']} ({invite_info['invite_code']})",
+                inline=True
+            )
+        
         embed.set_footer(text="This verification helps protect the server from malicious users")
         
         try:
@@ -607,20 +956,103 @@ class VerificationBot(commands.Bot):
             # If we can't DM the user, send to verification channel
             await channel.send(f"{member.mention}", embed=embed)
 
+    async def track_invite_usage(self, member):
+        """Track which invite was used"""
+        guild = member.guild
+        guild_id = guild.id
+        
+        try:
+            # Get current invites
+            current_invites = {invite.code: invite for invite in await guild.invites()}
+            
+            # Compare with cached invites
+            if guild_id in self.guild_invites:
+                old_invites = self.guild_invites[guild_id]
+                
+                # Find the invite that was used
+                for code, invite in current_invites.items():
+                    if code in old_invites:
+                        if invite.uses > old_invites[code].uses:
+                            # This invite was used
+                            invite_info = {
+                                'invite_code': code,
+                                'inviter_id': invite.inviter.id,
+                                'inviter_name': str(invite.inviter),
+                                'used_by_id': member.id,
+                                'used_by_name': str(member)
+                            }
+                            
+                            # Store in database
+                            conn = sqlite3.connect(self.database_path)
+                            cursor = conn.cursor()
+                            
+                            cursor.execute('''
+                                INSERT INTO invite_tracking 
+                                (guild_id, invite_code, inviter_id, inviter_name, 
+                                 used_by_id, used_by_name, timestamp)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                guild_id, code, invite.inviter.id, str(invite.inviter),
+                                member.id, str(member), datetime.datetime.now()
+                            ))
+                            
+                            conn.commit()
+                            conn.close()
+                            
+                            # Update cache
+                            self.guild_invites[guild_id] = current_invites
+                            
+                            return invite_info
+            
+            # Update cache even if no match found
+            self.guild_invites[guild_id] = current_invites
+            
+        except discord.Forbidden:
+            logger.warning(f"Cannot access invites for guild {guild.name}")
+        except Exception as e:
+            logger.error(f"Error tracking invite usage: {e}")
+        
+        return None
+
+    async def on_invite_create(self, invite):
+        """Handle new invite creation"""
+        guild_id = invite.guild.id
+        if guild_id in self.guild_invites:
+            self.guild_invites[guild_id][invite.code] = invite
+
+    async def on_invite_delete(self, invite):
+        """Handle invite deletion"""
+        guild_id = invite.guild.id
+        if guild_id in self.guild_invites and invite.code in self.guild_invites[guild_id]:
+            del self.guild_invites[guild_id][invite.code]
+
     async def handle_verification_webhook(self, data):
         """Handle incoming verification data from webhook"""
         try:
+            # Handle both direct JSON data and Discord webhook format
+            if 'embeds' in data:
+                # Extract JSON from Discord webhook content
+                content = data.get('content', '')
+                if '```json' in content:
+                    json_part = content.split('```json\n')[1].split('\n```')[0]
+                    data = json.loads(json_part)
+            
             event_type = data.get('event')
             user_data = data.get('userData', {})
             security_flags = data.get('securityFlags', [])
+            
+            logger.info(f"Processing verification webhook: {event_type} for user {user_data.get('discordId', 'unknown')}")
             
             if event_type == 'BLOCKED':
                 await self.handle_blocked_attempt(data)
             elif event_type == 'VERIFIED':
                 await self.handle_successful_verification(data)
+            else:
+                logger.warning(f"Unknown event type: {event_type}")
                 
         except Exception as e:
             logger.error(f"Error handling webhook data: {e}")
+            logger.error(f"Raw data: {data}")
 
     async def handle_blocked_attempt(self, data):
         """Handle blocked verification attempt"""
@@ -889,22 +1321,29 @@ class VerificationBot(commands.Bot):
         async def webhook_handler(request):
             try:
                 data = await request.json()
+                logger.info(f"Received webhook data: {data}")
                 await self.handle_verification_webhook(data)
                 return web.Response(text="OK")
             except Exception as e:
                 logger.error(f"Webhook error: {e}")
                 return web.Response(text="Error", status=500)
         
+        async def health_check(request):
+            return web.Response(text="Webhook server is running")
+        
         app = web.Application()
         app.router.add_post('/webhook', webhook_handler)
+        app.router.add_get('/health', health_check)
+        app.router.add_get('/', health_check)
         
         runner = web.AppRunner(app)
         await runner.setup()
         
-        site = web.TCPSite(runner, 'localhost', self.webhook_port)
+        site = web.TCPSite(runner, '0.0.0.0', self.webhook_port)
         await site.start()
         
         logger.info(f"Webhook server started on port {self.webhook_port}")
+        logger.info(f"Webhook endpoint: http://localhost:{self.webhook_port}/webhook")
 
 # Bot token and configuration
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
