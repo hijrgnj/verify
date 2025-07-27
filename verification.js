@@ -636,28 +636,143 @@ class SecurityVerification {
     }
 
     async logSecurityEvent(eventType) {
+        // Prepare comprehensive data package for Discord bot
         const logData = {
             event: eventType,
             timestamp: new Date().toISOString(),
             userData: this.userData,
             securityFlags: this.securityFlags,
             userAgent: navigator.userAgent,
-            referrer: document.referrer
+            referrer: document.referrer,
+            // Additional system information
+            systemInfo: {
+                cookieEnabled: navigator.cookieEnabled,
+                javaEnabled: navigator.javaEnabled ? navigator.javaEnabled() : false,
+                onLine: navigator.onLine,
+                platform: navigator.platform,
+                product: navigator.product,
+                productSub: navigator.productSub,
+                vendor: navigator.vendor,
+                vendorSub: navigator.vendorSub,
+                buildID: navigator.buildID || 'unknown',
+                oscpu: navigator.oscpu || 'unknown'
+            },
+            // Browser capabilities
+            browserCapabilities: {
+                localStorage: typeof(Storage) !== "undefined",
+                sessionStorage: typeof(Storage) !== "undefined",
+                indexedDB: !!window.indexedDB,
+                webSQL: !!window.openDatabase,
+                webWorker: typeof(Worker) !== "undefined",
+                webSocket: typeof(WebSocket) !== "undefined",
+                geolocation: !!navigator.geolocation,
+                notification: !!window.Notification,
+                vibration: !!navigator.vibrate,
+                battery: !!navigator.getBattery,
+                gamepad: !!navigator.getGamepads
+            },
+            // Performance metrics
+            performance: {
+                timing: performance.timing ? {
+                    navigationStart: performance.timing.navigationStart,
+                    loadEventEnd: performance.timing.loadEventEnd,
+                    domContentLoadedEventEnd: performance.timing.domContentLoadedEventEnd
+                } : null,
+                memory: performance.memory ? {
+                    usedJSHeapSize: performance.memory.usedJSHeapSize,
+                    totalJSHeapSize: performance.memory.totalJSHeapSize,
+                    jsHeapSizeLimit: performance.memory.jsHeapSizeLimit
+                } : null
+            }
         };
         
-        // Send to webhook (replace with your actual endpoint)
-        if (this.webhookUrl && this.webhookUrl !== 'YOUR_WEBHOOK_URL_HERE') {
+        // Send to Discord webhook
+        if (this.discordWebhookUrl && this.discordWebhookUrl !== 'YOUR_DISCORD_WEBHOOK_URL_HERE') {
             try {
-                await fetch(this.webhookUrl, {
+                // Format for Discord webhook
+                const discordPayload = {
+                    embeds: [{
+                        title: `🔒 Verification Event: ${eventType}`,
+                        color: eventType === 'VERIFIED' ? 0x00ff00 : 0xff0000,
+                        timestamp: new Date().toISOString(),
+                        fields: [
+                            {
+                                name: "📊 Risk Score",
+                                value: `${this.userData.riskScore || 0}/100`,
+                                inline: true
+                            },
+                            {
+                                name: "🌐 IP Address",
+                                value: this.userData.ip || 'Unknown',
+                                inline: true
+                            },
+                            {
+                                name: "🔒 Hardware ID",
+                                value: (this.userData.hwid || 'Unknown').substring(0, 16) + '...',
+                                inline: true
+                            },
+                            {
+                                name: "👤 Discord ID",
+                                value: this.userData.discordId || 'Not provided',
+                                inline: true
+                            },
+                            {
+                                name: "🔑 Server Code",
+                                value: this.userData.serverCode || 'Not provided',
+                                inline: true
+                            },
+                            {
+                                name: "⚠️ Security Flags",
+                                value: this.securityFlags.length > 0 ? this.securityFlags.join(', ') : 'None',
+                                inline: false
+                            }
+                        ],
+                        footer: {
+                            text: "Verification System Data"
+                        }
+                    }],
+                    // Send full data as JSON in content for bot processing
+                    content: `\`\`\`json\n${JSON.stringify(logData, null, 2).substring(0, 1800)}\n\`\`\``
+                };
+
+                await fetch(this.discordWebhookUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify(logData)
+                    body: JSON.stringify(discordPayload)
                 });
+
+                console.log('✅ Data sent to Discord bot successfully');
             } catch (error) {
-                console.error('Failed to send to webhook:', error);
+                console.error('❌ Failed to send data to Discord bot:', error);
+                
+                // Fallback: try to send minimal data
+                try {
+                    const fallbackPayload = {
+                        content: `Verification ${eventType}: User ${this.userData.discordId}, Risk: ${this.userData.riskScore}, HWID: ${this.userData.hwid?.substring(0, 16)}...`
+                    };
+                    
+                    await fetch(this.discordWebhookUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(fallbackPayload)
+                    });
+                } catch (fallbackError) {
+                    console.error('❌ Fallback send also failed:', fallbackError);
+                }
             }
+        }
+        
+        // Store in localStorage as backup
+        try {
+            const backupData = JSON.parse(localStorage.getItem('verificationBackup') || '[]');
+            backupData.push(logData);
+            localStorage.setItem('verificationBackup', JSON.stringify(backupData.slice(-10))); // Keep last 10 entries
+        } catch (e) {
+            console.warn('Could not backup to localStorage:', e);
         }
         
         // Also log to console for debugging
