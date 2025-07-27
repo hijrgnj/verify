@@ -281,10 +281,12 @@ class VerificationBot(commands.Bot):
             `!set_logs #channel` - Set log channel
             `!verification_url` - Get verification URL
             `!stats` - View verification statistics
+            `!invites` - View invite tracking statistics
             `!check_user @user` - Check user verification status
-            `!settings` - View current server settings
-            `!export_data` - Export verification data (Owner/Whitelisted)
-            `!whitelist @user` - Whitelist user for data export (Owner only)
+            `!ipban @user` - Ban user's IP address
+            `!ipunban <ip>` - Remove IP ban
+            `!ipbans` - List all IP bans
+            `!checkip <ip>` - Check IP status and users
             """,
             inline=False
         )
@@ -1076,46 +1078,235 @@ class VerificationBot(commands.Bot):
         
         await ctx.send(embed=embed)
 
-    @commands.command(name='check_user')
+    @commands.command(name='invites')
     @commands.has_permissions(administrator=True)
-    async def check_user_verification(self, ctx, user: discord.Member):
-        """Check a user's verification status"""
+    async def invite_stats(self, ctx):
+        """Show invite tracking statistics"""
         guild_id = ctx.guild.id
         
         conn = sqlite3.connect(self.database_path)
         cursor = conn.cursor()
         
+        # Get invite statistics
         cursor.execute('''
-            SELECT discord_id, hwid, risk_score, timestamp, security_flags 
+            SELECT inviter_id, inviter_name, COUNT(*) as invite_count
+            FROM invite_tracking 
+            WHERE guild_id = ? 
+            GROUP BY inviter_id, inviter_name
+            ORDER BY invite_count DESC
+            LIMIT 10
+        ''', (guild_id,))
+        
+        top_inviters = cursor.fetchall()
+        
+        # Get recent invites
+        cursor.execute('''
+            SELECT inviter_name, used_by_name, invite_code, timestamp, verification_status
+            FROM invite_tracking 
+            WHERE guild_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        ''', (guild_id,))
+        
+        recent_invites = cursor.fetchall()
+        
+        # Get total stats
+        cursor.execute('''
+            SELECT COUNT(*) as total_invites,
+                   COUNT(CASE WHEN verification_status = 'VERIFIED' THEN 1 END) as verified_count,
+                   COUNT(CASE WHEN verification_status = 'BLOCKED' THEN 1 END) as blocked_count
+            FROM invite_tracking 
+            WHERE guild_id = ?
+        ''', (guild_id,))
+        
+        total_stats = cursor.fetchone()
+        conn.close()
+        
+        embed = discord.Embed(
+            title="📨 Invite Tracking Statistics",
+            color=0x667eea,
+            timestamp=datetime.datetime.now()
+        )
+        
+        if total_stats:
+            total_invites, verified_count, blocked_count = total_stats
+            embed.add_field(
+                name="📊 Overall Statistics",
+                value=f"""
+                **Total Invites Used:** {total_invites}
+                **Successfully Verified:** {verified_count}
+                **Blocked/Failed:** {blocked_count}
+                **Success Rate:** {(verified_count/total_invites*100) if total_invites > 0 else 0:.1f}%
+                """,
+                inline=False
+            )
+        
+        if top_inviters:
+            inviter_list = []
+            for inviter_id, inviter_name, count in top_inviters:
+                member = ctx.guild.get_member(int(inviter_id))
+                display_name = member.mention if member else inviter_name
+                inviter_list.append(f"{display_name}: **{count}** invites")
+            
+            embed.add_field(
+                name="🏆 Top Inviters",
+                value="\n".join(inviter_list),
+                inline=True
+            )
+        
+        if recent_invites:
+            recent_list = []
+            for inviter_name, used_by_name, invite_code, timestamp, status in recent_invites[:5]:
+                status_emoji = "✅" if status == "VERIFIED" else "❌" if status == "BLOCKED" else "⏳"
+                recent_list.append(f"{status_emoji} **{inviter_name}** → {used_by_name}")
+            
+            embed.add_field(
+                name="🕒 Recent Invites",
+                value="\n".join(recent_list),
+                inline=True
+            )
+        
+        embed.set_footer(text="Use !check_user @user to see who invited a specific user")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='check_user')
+    @commands.has_permissions(administrator=True)
+    async def check_user_verification(self, ctx, user: discord.Member):
+        """Check a user's verification status and invite information"""
+        guild_id = ctx.guild.id
+        user_id = str(user.id)
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Get verification data
+        cursor.execute('''
+            SELECT discord_id, hwid, risk_score, timestamp, security_flags, ip_address 
             FROM verifications 
             WHERE guild_id = ? AND discord_id = ? AND status = "VERIFIED"
             ORDER BY timestamp DESC LIMIT 1
-        ''', (guild_id, str(user.id)))
+        ''', (guild_id, user_id))
         
-        result = cursor.fetchone()
+        verification_result = cursor.fetchone()
         
-        if result:
-            discord_id, hwid, risk_score, timestamp, security_flags = result
+        # Get invite information
+        cursor.execute('''
+            SELECT inviter_name, inviter_id, invite_code, timestamp, verification_status
+            FROM invite_tracking 
+            WHERE guild_id = ? AND used_by_id = ?
+            ORDER BY timestamp DESC LIMIT 1
+        ''', (guild_id, int(user.id)))
+        
+        invite_result = cursor.fetchone()
+        
+        # Check for other users with same IP or HWID
+        if verification_result:
+            _, hwid, _, _, _, ip_address = verification_result
+            
+            # Check for HWID duplicates
+            cursor.execute('''
+                SELECT discord_id, timestamp FROM verifications 
+                WHERE guild_id = ? AND hwid = ? AND discord_id != ? AND status = "VERIFIED"
+                ORDER BY timestamp DESC
+            ''', (guild_id, hwid, user_id))
+            
+            hwid_duplicates = cursor.fetchall()
+            
+            # Check for IP duplicates
+            cursor.execute('''
+                SELECT discord_id, timestamp FROM verifications 
+                WHERE guild_id = ? AND ip_address = ? AND discord_id != ? AND status = "VERIFIED"
+                ORDER BY timestamp DESC
+            ''', (guild_id, ip_address, user_id))
+            
+            ip_duplicates = cursor.fetchall()
+        else:
+            hwid_duplicates = []
+            ip_duplicates = []
+        
+        conn.close()
+        
+        if verification_result:
+            discord_id, hwid, risk_score, timestamp, security_flags, ip_address = verification_result
             
             embed = discord.Embed(
-                title=f"🔍 Verification Status: {user.display_name}",
-                color=0x00ff00 if risk_score < 50 else 0xff9900 if risk_score < 80 else 0xff0000
+                title=f"🔍 User Analysis: {user.display_name}",
+                color=0x00ff00 if risk_score < 50 else 0xff9900 if risk_score < 80 else 0xff0000,
+                timestamp=datetime.datetime.now()
             )
             
-            embed.add_field(name="✅ Status", value="Verified", inline=True)
+            embed.add_field(name="✅ Verification Status", value="Verified", inline=True)
             embed.add_field(name="📊 Risk Score", value=f"{risk_score}/100", inline=True)
             embed.add_field(name="🕒 Verified At", value=timestamp, inline=True)
+            
+            # Invite information
+            if invite_result:
+                inviter_name, inviter_id, invite_code, invite_timestamp, verification_status = invite_result
+                inviter_member = ctx.guild.get_member(int(inviter_id))
+                inviter_display = inviter_member.mention if inviter_member else inviter_name
+                
+                embed.add_field(
+                    name="📨 Invited By",
+                    value=f"{inviter_display}\nCode: `{invite_code}`\nDate: {invite_timestamp}",
+                    inline=True
+                )
+            else:
+                embed.add_field(name="📨 Invited By", value="Unknown/Direct join", inline=True)
+            
+            embed.add_field(name="🌐 IP Address", value=f"`{ip_address}`", inline=True)
             embed.add_field(name="🔒 HWID", value=hwid[:16] + "...", inline=True)
-            embed.add_field(name="⚠️ Security Flags", value=security_flags or "None", inline=False)
+            
+            if security_flags and security_flags != "[]":
+                embed.add_field(name="⚠️ Security Flags", value=security_flags, inline=False)
+            
+            # Show duplicates if any
+            if hwid_duplicates:
+                duplicate_list = []
+                for dup_id, dup_timestamp in hwid_duplicates[:3]:
+                    dup_member = ctx.guild.get_member(int(dup_id))
+                    dup_name = dup_member.mention if dup_member else f"<@{dup_id}>"
+                    duplicate_list.append(f"{dup_name} ({dup_timestamp})")
+                
+                embed.add_field(
+                    name="🚨 HWID Duplicates",
+                    value="\n".join(duplicate_list) + (f"\n+{len(hwid_duplicates)-3} more" if len(hwid_duplicates) > 3 else ""),
+                    inline=False
+                )
+            
+            if ip_duplicates:
+                ip_duplicate_list = []
+                for dup_id, dup_timestamp in ip_duplicates[:3]:
+                    dup_member = ctx.guild.get_member(int(dup_id))
+                    dup_name = dup_member.mention if dup_member else f"<@{dup_id}>"
+                    ip_duplicate_list.append(f"{dup_name} ({dup_timestamp})")
+                
+                embed.add_field(
+                    name="🚨 IP Duplicates",
+                    value="\n".join(ip_duplicate_list) + (f"\n+{len(ip_duplicates)-3} more" if len(ip_duplicates) > 3 else ""),
+                    inline=False
+                )
             
         else:
             embed = discord.Embed(
-                title=f"❌ Verification Status: {user.display_name}",
+                title=f"❌ User Analysis: {user.display_name}",
                 description="User is not verified",
-                color=0xff0000
+                color=0xff0000,
+                timestamp=datetime.datetime.now()
             )
+            
+            # Still show invite info if available
+            if invite_result:
+                inviter_name, inviter_id, invite_code, invite_timestamp, verification_status = invite_result
+                inviter_member = ctx.guild.get_member(int(inviter_id))
+                inviter_display = inviter_member.mention if inviter_member else inviter_name
+                
+                embed.add_field(
+                    name="📨 Invited By",
+                    value=f"{inviter_display}\nCode: `{invite_code}`\nDate: {invite_timestamp}\nStatus: {verification_status}",
+                    inline=False
+                )
         
-        conn.close()
         await ctx.send(embed=embed)
 
     @commands.command(name='risk_threshold')
@@ -1430,6 +1621,19 @@ class VerificationBot(commands.Bot):
             'VERIFIED',
             encrypted_data
         ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Update invite tracking status
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE invite_tracking 
+            SET verification_status = 'VERIFIED'
+            WHERE guild_id = ? AND used_by_id = ?
+        ''', (guild_id, int(discord_id)))
         
         conn.commit()
         conn.close()
