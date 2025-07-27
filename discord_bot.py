@@ -283,10 +283,13 @@ class VerificationBot(commands.Bot):
             `!stats` - View verification statistics
             `!invites` - View invite tracking statistics
             `!check_user @user` - Check user verification status
+            `!send_verification @user` - Manually send verification to user
             `!ipban @user` - Ban user's IP address
             `!ipunban <ip>` - Remove IP ban
             `!ipbans` - List all IP bans
             `!checkip <ip>` - Check IP status and users
+            `!export_data` - Export verification data (Owner/Whitelisted)
+            `!whitelist @user` - Whitelist user for data export (Owner only)
             """,
             inline=False
         )
@@ -669,6 +672,96 @@ class VerificationBot(commands.Bot):
         )
         
         await ctx.send(embed=embed)
+
+    @commands.command(name='send_verification')
+    @commands.has_permissions(administrator=True)
+    async def send_verification_manual(self, ctx, user: discord.Member):
+        """Manually send verification instructions to a user"""
+        guild_id = ctx.guild.id
+        
+        if guild_id not in self.server_codes:
+            await ctx.send("❌ Server not set up! Use `!setup` first.")
+            return
+        
+        verification_code = self.server_codes[guild_id]
+        verification_url = f"{self.verification_url}?server={verification_code}"
+        
+        embed = discord.Embed(
+            title=f"🛡️ Verification Required - {ctx.guild.name}",
+            description="Please complete verification to access the server",
+            color=0x667eea
+        )
+        
+        embed.add_field(
+            name="🔗 Verification Link",
+            value=f"[Click here to verify]({verification_url})",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📋 Instructions",
+            value="""
+            1. Click the verification link above
+            2. Complete the security checks
+            3. Enter your Discord User ID and server code
+            4. Wait for verification to complete
+            """,
+            inline=False
+        )
+        
+        embed.add_field(
+            name="ℹ️ Your Discord User ID",
+            value=f"`{user.id}`",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔑 Your Server Code",
+            value=f"`{verification_code}`",
+            inline=True
+        )
+        
+        embed.set_footer(text=f"Sent by {ctx.author} • This verification helps protect the server")
+        
+        try:
+            await user.send(embed=embed)
+            
+            success_embed = discord.Embed(
+                title="✅ Verification Sent",
+                description=f"Verification instructions have been sent to {user.mention}'s DMs",
+                color=0x00ff00
+            )
+            success_embed.add_field(
+                name="📋 Details",
+                value=f"**User:** {user.mention}\n**Server Code:** `{verification_code}`\n**User ID:** `{user.id}`",
+                inline=False
+            )
+            
+            await ctx.send(embed=success_embed)
+            
+        except discord.Forbidden:
+            error_embed = discord.Embed(
+                title="❌ Cannot Send DM",
+                description=f"Could not send verification instructions to {user.mention}",
+                color=0xff0000
+            )
+            error_embed.add_field(
+                name="📋 Manual Verification Info",
+                value=f"**Verification URL:** {verification_url}\n**Server Code:** `{verification_code}`\n**User ID:** `{user.id}`",
+                inline=False
+            )
+            error_embed.set_footer(text="User has DMs disabled or blocked the bot")
+            
+            await ctx.send(embed=error_embed)
+            
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Failed to send DM: {str(e)}")
+
+    @commands.command(name='resend_verification')
+    @commands.has_permissions(administrator=True)
+    async def resend_verification(self, ctx, user: discord.Member):
+        """Resend verification instructions to a user (alias for send_verification)"""
+        await self.send_verification_manual(ctx, user)
 
     @commands.command(name='ipban')
     @commands.has_permissions(administrator=True)
@@ -1401,7 +1494,7 @@ class VerificationBot(commands.Bot):
         )
         
         embed.add_field(
-            name="🔑 Server Code",
+            name="🔑 Your Server Code",
             value=f"`{verification_code}`",
             inline=True
         )
@@ -1416,11 +1509,51 @@ class VerificationBot(commands.Bot):
         
         embed.set_footer(text="This verification helps protect the server from malicious users")
         
+        # Always try to DM the user first
+        dm_sent = False
         try:
             await member.send(embed=embed)
+            dm_sent = True
+            logger.info(f"Sent verification DM to {member} ({member.id}) in guild {guild_id}")
         except discord.Forbidden:
-            # If we can't DM the user, send to verification channel
-            await channel.send(f"{member.mention}", embed=embed)
+            logger.warning(f"Could not DM {member} ({member.id}) - DMs disabled")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to DM {member} ({member.id}): {e}")
+        
+        # Also send to verification channel as backup or if DM failed
+        if channel:
+            try:
+                if dm_sent:
+                    # Create a simpler message for the channel since user got DM
+                    channel_embed = discord.Embed(
+                        title=f"👋 Welcome {member.display_name}!",
+                        description=f"Please check your DMs for verification instructions.\n\nIf you didn't receive a DM, here's your verification info:",
+                        color=0x667eea
+                    )
+                    channel_embed.add_field(
+                        name="🔗 Verification Link",
+                        value=f"[Click here to verify]({verification_url})",
+                        inline=False
+                    )
+                    channel_embed.add_field(
+                        name="🔑 Your Server Code",
+                        value=f"`{verification_code}`",
+                        inline=True
+                    )
+                    channel_embed.add_field(
+                        name="ℹ️ Your Discord User ID",
+                        value=f"`{member.id}`",
+                        inline=True
+                    )
+                    await channel.send(f"{member.mention}", embed=channel_embed)
+                else:
+                    # Send full embed since DM failed
+                    await channel.send(f"{member.mention}", embed=embed)
+                    
+            except discord.Forbidden:
+                logger.error(f"Cannot send messages to verification channel in guild {guild_id}")
+            except discord.HTTPException as e:
+                logger.error(f"Failed to send verification message to channel: {e}")
 
     async def track_invite_usage(self, member):
         """Track which invite was used"""
