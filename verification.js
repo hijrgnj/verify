@@ -3,7 +3,6 @@ class SecurityVerification {
         this.userData = {};
         this.securityFlags = [];
         this.discordWebhookUrl = 'YOUR_DISCORD_WEBHOOK_URL_HERE'; // Replace with Discord webhook URL
-        this.vpnApiKey = 'YOUR_VPN_API_KEY_HERE'; // Replace with VPN detection API key
         this.init();
     }
 
@@ -208,20 +207,24 @@ class SecurityVerification {
             const ipData = await ipResponse.json();
             this.userData.ip = ipData.ip;
 
-            // Check multiple VPN detection services
+            // Manual VPN/Proxy detection methods
             const vpnChecks = await Promise.allSettled([
-                this.checkVPNService1(ipData.ip),
-                this.checkVPNService2(ipData.ip),
-                this.checkVPNService3(ipData.ip)
+                this.manualVPNCheck1(ipData.ip),
+                this.manualVPNCheck2(ipData.ip),
+                this.checkCommonVPNPorts(),
+                this.checkVPNHostnames(),
+                this.checkDatacenterRanges(ipData.ip)
             ]);
 
             let vpnDetected = false;
             let proxyDetected = false;
+            let datacenterDetected = false;
             
             vpnChecks.forEach((result, index) => {
                 if (result.status === 'fulfilled' && result.value) {
                     if (result.value.vpn) vpnDetected = true;
                     if (result.value.proxy) proxyDetected = true;
+                    if (result.value.datacenter) datacenterDetected = true;
                     this.userData[`vpnCheck${index + 1}`] = result.value;
                 }
             });
@@ -231,6 +234,9 @@ class SecurityVerification {
             }
             if (proxyDetected) {
                 this.securityFlags.push('Proxy detected');
+            }
+            if (datacenterDetected) {
+                this.securityFlags.push('Datacenter IP detected');
             }
 
             // Additional network checks
