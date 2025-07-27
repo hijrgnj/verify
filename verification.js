@@ -2,7 +2,7 @@ class SecurityVerification {
     constructor() {
         this.userData = {};
         this.securityFlags = [];
-        this.webhookUrl = 'YOUR_WEBHOOK_URL_HERE'; // Replace with actual webhook URL
+        this.discordWebhookUrl = 'YOUR_DISCORD_WEBHOOK_URL_HERE'; // Replace with Discord webhook URL
         this.vpnApiKey = 'YOUR_VPN_API_KEY_HERE'; // Replace with VPN detection API key
         this.init();
     }
