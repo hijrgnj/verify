@@ -43,6 +43,7 @@ class VerificationBot(commands.Bot):
         self.verified_users: Dict[int, List[str]] = {}  # guild_id -> [hwid_list]
         self.guild_invites: Dict[int, Dict[str, discord.Invite]] = {}  # guild_id -> {code: invite}
         self.whitelisted_users: List[int] = []  # Users who can export data
+        self.ip_bans: Dict[int, List[str]] = {}  # guild_id -> [banned_ips]
         
         # Initialize database
         self.init_database()
@@ -145,6 +146,20 @@ class VerificationBot(commands.Bot):
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ip_bans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ip_address TEXT NOT NULL,
+                banned_user_id TEXT,
+                banned_user_name TEXT,
+                reason TEXT NOT NULL,
+                banned_by INTEGER NOT NULL,
+                banned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, ip_address)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
 
@@ -158,6 +173,9 @@ class VerificationBot(commands.Bot):
         
         # Load whitelisted users
         await self.load_whitelisted_users()
+        
+        # Load IP bans
+        await self.load_ip_bans()
         
         # Cache invites for all guilds
         await self.cache_invites()
@@ -187,6 +205,21 @@ class VerificationBot(commands.Bot):
         rows = cursor.fetchall()
         
         self.whitelisted_users = [row[0] for row in rows]
+        
+        conn.close()
+
+    async def load_ip_bans(self):
+        """Load IP bans from database"""
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT guild_id, ip_address FROM ip_bans')
+        rows = cursor.fetchall()
+        
+        for guild_id, ip_address in rows:
+            if guild_id not in self.ip_bans:
+                self.ip_bans[guild_id] = []
+            self.ip_bans[guild_id].append(ip_address)
         
         conn.close()
 
@@ -632,6 +665,248 @@ class VerificationBot(commands.Bot):
             description=f"{user.mention} has been whitelisted for data export",
             color=0x00ff00
         )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='ipban')
+    @commands.has_permissions(administrator=True)
+    async def ip_ban(self, ctx, user: discord.Member, *, reason="No reason provided"):
+        """Ban a user's IP address based on their verification data"""
+        guild_id = ctx.guild.id
+        user_id = str(user.id)
+        
+        # Get user's IP from verification data
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT ip_address FROM verifications 
+            WHERE guild_id = ? AND discord_id = ? AND status = "VERIFIED"
+            ORDER BY timestamp DESC LIMIT 1
+        ''', (guild_id, user_id))
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            await ctx.send(f"❌ No verification data found for {user.mention}")
+            conn.close()
+            return
+        
+        ip_address = result[0]
+        
+        # Check if IP is already banned
+        cursor.execute('''
+            SELECT banned_user_name FROM ip_bans 
+            WHERE guild_id = ? AND ip_address = ?
+        ''', (guild_id, ip_address))
+        
+        existing_ban = cursor.fetchone()
+        
+        if existing_ban:
+            await ctx.send(f"❌ IP `{ip_address}` is already banned (previously banned user: {existing_ban[0]})")
+            conn.close()
+            return
+        
+        # Add IP ban
+        cursor.execute('''
+            INSERT INTO ip_bans 
+            (guild_id, ip_address, banned_user_id, banned_user_name, reason, banned_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (guild_id, ip_address, user_id, str(user), reason, ctx.author.id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Update memory cache
+        if guild_id not in self.ip_bans:
+            self.ip_bans[guild_id] = []
+        self.ip_bans[guild_id].append(ip_address)
+        
+        # Try to kick/ban the user
+        try:
+            await user.kick(reason=f"IP banned: {reason}")
+            action_taken = "User kicked from server"
+        except discord.Forbidden:
+            action_taken = "Unable to kick user (insufficient permissions)"
+        except discord.HTTPException:
+            action_taken = "Failed to kick user"
+        
+        embed = discord.Embed(
+            title="🚫 IP Ban Applied",
+            color=0xff0000,
+            timestamp=datetime.datetime.now()
+        )
+        
+        embed.add_field(name="👤 User", value=f"{user.mention} ({user.id})", inline=True)
+        embed.add_field(name="🌐 IP Address", value=f"`{ip_address}`", inline=True)
+        embed.add_field(name="📝 Reason", value=reason, inline=False)
+        embed.add_field(name="⚡ Action", value=action_taken, inline=False)
+        embed.set_footer(text=f"Banned by {ctx.author}")
+        
+        await ctx.send(embed=embed)
+        
+        # Log to security channel
+        await self.log_ip_ban_event(ctx.guild, user, ip_address, reason, ctx.author, "BANNED")
+
+    @commands.command(name='ipunban')
+    @commands.has_permissions(administrator=True)
+    async def ip_unban(self, ctx, ip_address: str):
+        """Remove an IP ban"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Check if IP is banned
+        cursor.execute('''
+            SELECT banned_user_name, reason FROM ip_bans 
+            WHERE guild_id = ? AND ip_address = ?
+        ''', (guild_id, ip_address))
+        
+        result = cursor.fetchone()
+        
+        if not result:
+            await ctx.send(f"❌ IP `{ip_address}` is not banned")
+            conn.close()
+            return
+        
+        banned_user_name, reason = result
+        
+        # Remove IP ban
+        cursor.execute('''
+            DELETE FROM ip_bans 
+            WHERE guild_id = ? AND ip_address = ?
+        ''', (guild_id, ip_address))
+        
+        conn.commit()
+        conn.close()
+        
+        # Update memory cache
+        if guild_id in self.ip_bans and ip_address in self.ip_bans[guild_id]:
+            self.ip_bans[guild_id].remove(ip_address)
+        
+        embed = discord.Embed(
+            title="✅ IP Ban Removed",
+            color=0x00ff00,
+            timestamp=datetime.datetime.now()
+        )
+        
+        embed.add_field(name="🌐 IP Address", value=f"`{ip_address}`", inline=True)
+        embed.add_field(name="👤 Previously Banned User", value=banned_user_name, inline=True)
+        embed.add_field(name="📝 Original Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Unbanned by {ctx.author}")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='ipbans')
+    @commands.has_permissions(administrator=True)
+    async def list_ip_bans(self, ctx):
+        """List all IP bans for this server"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT ip_address, banned_user_name, reason, banned_at 
+            FROM ip_bans WHERE guild_id = ?
+            ORDER BY banned_at DESC
+        ''', (guild_id,))
+        
+        bans = cursor.fetchall()
+        conn.close()
+        
+        if not bans:
+            await ctx.send("ℹ️ No IP bans found for this server")
+            return
+        
+        embed = discord.Embed(
+            title="🚫 IP Bans List",
+            description=f"Total IP bans: {len(bans)}",
+            color=0xff0000
+        )
+        
+        ban_list = []
+        for ip, user_name, reason, banned_at in bans[:10]:  # Show first 10
+            ban_list.append(f"**IP:** `{ip}`\n**User:** {user_name}\n**Reason:** {reason}\n**Date:** {banned_at}\n")
+        
+        embed.add_field(
+            name="Recent Bans",
+            value="\n".join(ban_list) if ban_list else "None",
+            inline=False
+        )
+        
+        if len(bans) > 10:
+            embed.set_footer(text=f"Showing 10 of {len(bans)} bans. Use !export_data for full list.")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='checkip')
+    @commands.has_permissions(administrator=True)
+    async def check_ip(self, ctx, ip_address: str):
+        """Check if an IP is banned and show associated users"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Check if IP is banned
+        cursor.execute('''
+            SELECT banned_user_name, reason, banned_at, banned_by 
+            FROM ip_bans WHERE guild_id = ? AND ip_address = ?
+        ''', (guild_id, ip_address))
+        
+        ban_info = cursor.fetchone()
+        
+        # Get all users who have used this IP
+        cursor.execute('''
+            SELECT discord_id, timestamp, risk_score, security_flags 
+            FROM verifications 
+            WHERE guild_id = ? AND ip_address = ? 
+            ORDER BY timestamp DESC
+        ''', (guild_id, ip_address))
+        
+        users = cursor.fetchall()
+        conn.close()
+        
+        embed = discord.Embed(
+            title=f"🔍 IP Address Analysis: `{ip_address}`",
+            color=0xff0000 if ban_info else 0x667eea
+        )
+        
+        if ban_info:
+            banned_user, reason, banned_at, banned_by = ban_info
+            embed.add_field(
+                name="🚫 Ban Status",
+                value=f"**BANNED**\nUser: {banned_user}\nReason: {reason}\nDate: {banned_at}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="✅ Ban Status",
+                value="Not banned",
+                inline=True
+            )
+        
+        if users:
+            user_list = []
+            for discord_id, timestamp, risk_score, security_flags in users[:5]:
+                user_list.append(f"<@{discord_id}> - Risk: {risk_score} - {timestamp}")
+            
+            embed.add_field(
+                name=f"👥 Associated Users ({len(users)} total)",
+                value="\n".join(user_list) if user_list else "None",
+                inline=False
+            )
+            
+            if len(users) > 5:
+                embed.set_footer(text=f"Showing 5 of {len(users)} users")
+        else:
+            embed.add_field(
+                name="👥 Associated Users",
+                value="No verification data found",
+                inline=False
+            )
         
         await ctx.send(embed=embed)
 
@@ -1110,11 +1385,24 @@ class VerificationBot(commands.Bot):
             logger.error(f"Guild not found: {guild_id}")
             return
         
+        # Check if IP is banned
+        ip_address = user_data.get('ip', '')
+        if await self.check_ip_banned(guild_id, ip_address):
+            await self.handle_ip_ban_attempt(guild, discord_id, ip_address)
+            return
+        
         # Check for duplicate HWID
         duplicate_user = await self.check_duplicate_hwid(guild_id, hwid, discord_id)
         
         if duplicate_user:
             await self.handle_duplicate_detection(guild, discord_id, duplicate_user, hwid)
+            return
+        
+        # Check for duplicate IP
+        duplicate_ip_user = await self.check_duplicate_ip(guild_id, ip_address, discord_id)
+        
+        if duplicate_ip_user:
+            await self.handle_ip_duplicate_detection(guild, discord_id, duplicate_ip_user, ip_address)
             return
         
         # Store verification data
