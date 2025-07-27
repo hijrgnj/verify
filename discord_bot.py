@@ -22,6 +22,7 @@ class VerificationBot(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.guilds = True
+        intents.invites = True
         
         super().__init__(
             command_prefix='!',
@@ -34,11 +35,14 @@ class VerificationBot(commands.Bot):
         self.webhook_port = 8080
         self.database_path = "verification_data.db"
         self.encryption_key = self.generate_encryption_key()
+        self.owner_id = 945344266404782140  # Bot owner ID
         
         # Data storage
         self.pending_verifications: Dict[str, Dict] = {}
         self.server_codes: Dict[int, str] = {}  # guild_id -> verification_code
         self.verified_users: Dict[int, List[str]] = {}  # guild_id -> [hwid_list]
+        self.guild_invites: Dict[int, Dict[str, discord.Invite]] = {}  # guild_id -> {code: invite}
+        self.whitelisted_users: List[int] = []  # Users who can export data
         
         # Initialize database
         self.init_database()
@@ -113,7 +117,31 @@ class VerificationBot(commands.Bot):
                 log_channel INTEGER,
                 auto_kick BOOLEAN DEFAULT 1,
                 risk_threshold INTEGER DEFAULT 70,
+                invite_tracking BOOLEAN DEFAULT 1,
+                welcome_message TEXT DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS invite_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                invite_code TEXT NOT NULL,
+                inviter_id INTEGER NOT NULL,
+                inviter_name TEXT NOT NULL,
+                used_by_id INTEGER NOT NULL,
+                used_by_name TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                verification_status TEXT DEFAULT 'PENDING'
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS whitelisted_users (
+                user_id INTEGER PRIMARY KEY,
+                added_by INTEGER NOT NULL,
+                added_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -127,6 +155,12 @@ class VerificationBot(commands.Bot):
         
         # Load server settings
         await self.load_server_settings()
+        
+        # Load whitelisted users
+        await self.load_whitelisted_users()
+        
+        # Cache invites for all guilds
+        await self.cache_invites()
         
         # Start periodic cleanup
         self.cleanup_old_data.start()
@@ -143,6 +177,29 @@ class VerificationBot(commands.Bot):
             self.server_codes[guild_id] = code
             
         conn.close()
+
+    async def load_whitelisted_users(self):
+        """Load whitelisted users from database"""
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT user_id FROM whitelisted_users')
+        rows = cursor.fetchall()
+        
+        self.whitelisted_users = [row[0] for row in rows]
+        
+        conn.close()
+
+    async def cache_invites(self):
+        """Cache all guild invites for tracking"""
+        for guild in self.guilds:
+            try:
+                invites = await guild.invites()
+                self.guild_invites[guild.id] = {invite.code: invite for invite in invites}
+            except discord.Forbidden:
+                logger.warning(f"Cannot access invites for guild {guild.name} ({guild.id})")
+            except Exception as e:
+                logger.error(f"Error caching invites for guild {guild.name}: {e}")
 
     @tasks.loop(hours=24)
     async def cleanup_old_data(self):
@@ -185,13 +242,16 @@ class VerificationBot(commands.Bot):
             name="🔧 Commands",
             value="""
             `!setup` - Initialize bot for this server
+            `!tutorial` - Complete setup tutorial
+            `!config` - Server configuration menu
             `!set_channel #channel` - Set verification channel
             `!set_logs #channel` - Set log channel
             `!verification_url` - Get verification URL
             `!stats` - View verification statistics
             `!check_user @user` - Check user verification status
             `!settings` - View current server settings
-            `!risk_threshold <number>` - Set risk threshold (0-100)
+            `!export_data` - Export verification data (Owner/Whitelisted)
+            `!whitelist @user` - Whitelist user for data export (Owner only)
             """,
             inline=False
         )
