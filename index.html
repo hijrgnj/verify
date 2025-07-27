@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verification System</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fingerprintjs2/2.1.0/fingerprint2.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="verification-card">
+            <div class="header">
+                <h1>🛡️ Security Verification</h1>
+                <p>Please complete verification to continue</p>
+            </div>
+            
+            <div id="loading" class="loading-section">
+                <div class="spinner"></div>
+                <p>Analyzing your connection...</p>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="status-text" id="statusText">Initializing security checks...</div>
+            </div>
+            
+            <div id="verification-form" class="verification-section" style="display: none;">
+                <form id="verifyForm">
+                    <div class="form-group">
+                        <label for="discordId">Discord User ID:</label>
+                        <input type="text" id="discordId" name="discordId" required 
+                               placeholder="Enter your Discord User ID">
+                        <small>Find this in Discord Developer Mode</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="serverCode">Server Code:</label>
+                        <input type="text" id="serverCode" name="serverCode" required 
+                               placeholder="Enter server verification code">
+                    </div>
+                    
+                    <button type="submit" id="submitBtn">Complete Verification</button>
+                </form>
+            </div>
+            
+            <div id="blocked" class="blocked-section" style="display: none;">
+                <div class="error-icon">🚫</div>
+                <h2>Access Denied</h2>
+                <p id="blockReason">Your connection has been flagged by our security system.</p>
+                <div class="block-details">
+                    <ul id="blockReasons"></ul>
+                </div>
+            </div>
+            
+            <div id="success" class="success-section" style="display: none;">
+                <div class="success-icon">✅</div>
+                <h2>Verification Complete</h2>
+                <p>Your information has been recorded. You may now close this window.</p>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>🔒 Your data is encrypted and securely processed</p>
+        </div>
+    </div>
+    
+    <script src="verification.js"></script>
+</body>
+</html>
