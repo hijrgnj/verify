@@ -120,6 +120,9 @@ class VerificationBot(commands.Bot):
                 risk_threshold INTEGER DEFAULT 70,
                 invite_tracking BOOLEAN DEFAULT 1,
                 welcome_message TEXT DEFAULT NULL,
+                verified_role_id INTEGER DEFAULT NULL,
+                unverified_role_id INTEGER DEFAULT NULL,
+                auto_role BOOLEAN DEFAULT 1,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -279,6 +282,10 @@ class VerificationBot(commands.Bot):
             `!config` - Server configuration menu
             `!set_channel #channel` - Set verification channel
             `!set_logs #channel` - Set log channel
+            `!setup_roles` - Create verification roles automatically
+            `!set_verified_role @role` - Set verified user role
+            `!set_unverified_role @role` - Set unverified user role
+            `!toggle_autorole` - Toggle automatic role assignment
             `!verification_url` - Get verification URL
             `!stats` - View verification statistics
             `!invites` - View invite tracking statistics
@@ -354,13 +361,15 @@ class VerificationBot(commands.Bot):
         )
         
         embed.add_field(
-            name="📝 Step 2: Configure Channels",
+            name="📝 Step 2: Configure Channels & Roles",
             value="""
             • Set verification channel: `!set_channel #verification`
             • Set log channel: `!set_logs #security-logs`
+            • Create verification roles: `!setup_roles`
             
             The verification channel is where new members will see verification instructions.
             The log channel is where all security events will be recorded.
+            The roles help manage verified/unverified members automatically.
             """,
             inline=False
         )
@@ -381,6 +390,8 @@ class VerificationBot(commands.Bot):
             • Enable/disable auto-kick: `!config auto_kick true`
             • Set welcome message: `!config welcome_message "Welcome!"`
             • Toggle invite tracking: `!config invite_tracking true`
+            • Enable/disable auto-roles: `!config auto_role true`
+            • Set custom roles: `!set_verified_role @Verified` / `!set_unverified_role @Unverified`
             """,
             inline=False
         )
@@ -431,7 +442,7 @@ class VerificationBot(commands.Bot):
             
             cursor.execute('''
                 SELECT verification_channel, log_channel, auto_kick, risk_threshold, 
-                       invite_tracking, welcome_message 
+                       invite_tracking, welcome_message, verified_role_id, unverified_role_id, auto_role
                 FROM server_settings WHERE guild_id = ?
             ''', (guild_id,))
             
@@ -439,7 +450,10 @@ class VerificationBot(commands.Bot):
             conn.close()
             
             if result:
-                ver_ch, log_ch, auto_kick, risk_thresh, inv_track, welcome_msg = result
+                ver_ch, log_ch, auto_kick, risk_thresh, inv_track, welcome_msg, verified_role_id, unverified_role_id, auto_role = result
+                
+                verified_role = ctx.guild.get_role(verified_role_id) if verified_role_id else None
+                unverified_role = ctx.guild.get_role(unverified_role_id) if unverified_role_id else None
                 
                 embed.add_field(
                     name="📋 Available Settings",
@@ -450,6 +464,9 @@ class VerificationBot(commands.Bot):
                     **risk_threshold** - Current: {risk_thresh}
                     **invite_tracking** - Current: {'Enabled' if inv_track else 'Disabled'}
                     **welcome_message** - Current: {welcome_msg or 'Default'}
+                    **auto_role** - Current: {'Enabled' if auto_role else 'Disabled'}
+                    **verified_role** - Current: {verified_role.mention if verified_role else 'Not set'}
+                    **unverified_role** - Current: {unverified_role.mention if unverified_role else 'Not set'}
                     """,
                     inline=False
                 )
@@ -509,6 +526,14 @@ class VerificationBot(commands.Bot):
                 (value, guild_id)
             )
             await ctx.send(f"✅ Welcome message updated")
+            
+        elif setting == 'auto_role':
+            auto_role = value.lower() in ['true', '1', 'yes', 'on', 'enable']
+            cursor.execute(
+                'UPDATE server_settings SET auto_role = ? WHERE guild_id = ?',
+                (auto_role, guild_id)
+            )
+            await ctx.send(f"✅ Auto-role {'enabled' if auto_role else 'disabled'}")
             
         else:
             await ctx.send("❌ Unknown setting. Use `!config` to see available options.")
@@ -672,6 +697,166 @@ class VerificationBot(commands.Bot):
         )
         
         await ctx.send(embed=embed)
+
+    @commands.command(name='set_verified_role')
+    @commands.has_permissions(administrator=True)
+    async def set_verified_role(self, ctx, role: discord.Role):
+        """Set the role given to verified users"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE server_settings SET verified_role_id = ? WHERE guild_id = ?
+        ''', (role.id, guild_id))
+        
+        conn.commit()
+        conn.close()
+        
+        embed = discord.Embed(
+            title="✅ Verified Role Set",
+            description=f"Verified users will now receive the {role.mention} role",
+            color=0x00ff00
+        )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='set_unverified_role')
+    @commands.has_permissions(administrator=True)
+    async def set_unverified_role(self, ctx, role: discord.Role):
+        """Set the role given to unverified users"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE server_settings SET unverified_role_id = ? WHERE guild_id = ?
+        ''', (role.id, guild_id))
+        
+        conn.commit()
+        conn.close()
+        
+        embed = discord.Embed(
+            title="✅ Unverified Role Set",
+            description=f"New members will now receive the {role.mention} role until they verify",
+            color=0x00ff00
+        )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='toggle_autorole')
+    @commands.has_permissions(administrator=True)
+    async def toggle_autorole(self, ctx):
+        """Toggle automatic role assignment on/off"""
+        guild_id = ctx.guild.id
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Get current setting
+        cursor.execute('''
+            SELECT auto_role FROM server_settings WHERE guild_id = ?
+        ''', (guild_id,))
+        
+        result = cursor.fetchone()
+        current_setting = result[0] if result else True
+        new_setting = not current_setting
+        
+        cursor.execute('''
+            UPDATE server_settings SET auto_role = ? WHERE guild_id = ?
+        ''', (new_setting, guild_id))
+        
+        conn.commit()
+        conn.close()
+        
+        embed = discord.Embed(
+            title="⚙️ Auto-Role Updated",
+            description=f"Automatic role assignment is now {'**enabled**' if new_setting else '**disabled**'}",
+            color=0x00ff00 if new_setting else 0xff9900
+        )
+        
+        if new_setting:
+            embed.add_field(
+                name="📋 What this means",
+                value="• New members will automatically get the unverified role\n• Verified users will automatically get the verified role\n• Unverified role will be removed upon verification",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="📋 What this means",
+                value="• No automatic role assignment will occur\n• You'll need to manage roles manually",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='setup_roles')
+    @commands.has_permissions(administrator=True)
+    async def setup_roles(self, ctx):
+        """Automatically create and configure verification roles"""
+        guild = ctx.guild
+        guild_id = guild.id
+        
+        try:
+            # Create verified role
+            verified_role = await guild.create_role(
+                name="✅ Verified",
+                color=discord.Color.green(),
+                reason="Verification system - verified users"
+            )
+            
+            # Create unverified role
+            unverified_role = await guild.create_role(
+                name="❌ Unverified",
+                color=discord.Color.red(),
+                reason="Verification system - unverified users"
+            )
+            
+            # Update database
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE server_settings 
+                SET verified_role_id = ?, unverified_role_id = ?, auto_role = 1
+                WHERE guild_id = ?
+            ''', (verified_role.id, unverified_role.id, guild_id))
+            
+            conn.commit()
+            conn.close()
+            
+            embed = discord.Embed(
+                title="🎭 Roles Created Successfully",
+                description="Verification roles have been created and configured!",
+                color=0x00ff00
+            )
+            
+            embed.add_field(
+                name="✅ Verified Role",
+                value=f"{verified_role.mention}\nGiven to users who complete verification",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="❌ Unverified Role", 
+                value=f"{unverified_role.mention}\nGiven to new members until they verify",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="⚙️ Next Steps",
+                value="• Configure channel permissions for these roles\n• Use `!config` to adjust other settings\n• Test with `!send_verification @user`",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to create roles. Please ensure I have the 'Manage Roles' permission.")
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Failed to create roles: {str(e)}")
 
     @commands.command(name='send_verification')
     @commands.has_permissions(administrator=True)
@@ -1446,7 +1631,8 @@ class VerificationBot(commands.Bot):
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT verification_channel, welcome_message, invite_tracking 
+            SELECT verification_channel, welcome_message, invite_tracking, 
+                   unverified_role_id, auto_role
             FROM server_settings WHERE guild_id = ?
         ''', (guild_id,))
         result = cursor.fetchone()
@@ -1455,8 +1641,22 @@ class VerificationBot(commands.Bot):
         if not result:
             return
         
-        verification_channel_id, welcome_msg, invite_tracking = result
+        verification_channel_id, welcome_msg, invite_tracking, unverified_role_id, auto_role = result
         channel = self.get_channel(verification_channel_id)
+        
+        # Assign unverified role if auto_role is enabled
+        if auto_role and unverified_role_id:
+            unverified_role = member.guild.get_role(unverified_role_id)
+            if unverified_role:
+                try:
+                    await member.add_roles(unverified_role, reason="Auto-assigned unverified role")
+                    logger.info(f"Assigned unverified role to {member} ({member.id}) in guild {guild_id}")
+                except discord.Forbidden:
+                    logger.warning(f"Cannot assign unverified role in guild {guild_id} - insufficient permissions")
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to assign unverified role: {e}")
+            else:
+                logger.warning(f"Unverified role {unverified_role_id} not found in guild {guild_id}")
         
         if not channel:
             return
@@ -1758,7 +1958,7 @@ class VerificationBot(commands.Bot):
         conn.commit()
         conn.close()
         
-        # Update invite tracking status
+        # Update invite tracking status and handle role management
         conn = sqlite3.connect(self.database_path)
         cursor = conn.cursor()
         
@@ -1768,13 +1968,249 @@ class VerificationBot(commands.Bot):
             WHERE guild_id = ? AND used_by_id = ?
         ''', (guild_id, int(discord_id)))
         
+        # Get role settings
+        cursor.execute('''
+            SELECT verified_role_id, unverified_role_id, auto_role
+            FROM server_settings WHERE guild_id = ?
+        ''', (guild_id,))
+        
+        role_settings = cursor.fetchone()
         conn.commit()
         conn.close()
+        
+        # Handle role assignment
+        if role_settings:
+            verified_role_id, unverified_role_id, auto_role = role_settings
+            
+            if auto_role:
+                member = guild.get_member(int(discord_id))
+                if member:
+                    try:
+                        # Add verified role
+                        if verified_role_id:
+                            verified_role = guild.get_role(verified_role_id)
+                            if verified_role and verified_role not in member.roles:
+                                await member.add_roles(verified_role, reason="Verification completed")
+                                logger.info(f"Assigned verified role to {member} ({member.id})")
+                        
+                        # Remove unverified role
+                        if unverified_role_id:
+                            unverified_role = guild.get_role(unverified_role_id)
+                            if unverified_role and unverified_role in member.roles:
+                                await member.remove_roles(unverified_role, reason="Verification completed")
+                                logger.info(f"Removed unverified role from {member} ({member.id})")
+                                
+                    except discord.Forbidden:
+                        logger.warning(f"Cannot manage roles for {member} - insufficient permissions")
+                    except discord.HTTPException as e:
+                        logger.error(f"Failed to manage roles for {member}: {e}")
         
         # Log successful verification
         await self.log_verification_event(guild, discord_id, user_data, security_flags, 'VERIFIED')
         
         logger.info(f"Successful verification for user {discord_id} in guild {guild_id}")
+
+    async def check_ip_banned(self, guild_id: int, ip_address: str) -> bool:
+        """Check if an IP address is banned"""
+        if guild_id in self.ip_bans:
+            return ip_address in self.ip_bans[guild_id]
+        return False
+
+    async def check_duplicate_ip(self, guild_id: int, ip_address: str, current_discord_id: str) -> Optional[str]:
+        """Check if IP already exists for a different user"""
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT discord_id FROM verifications 
+            WHERE guild_id = ? AND ip_address = ? AND discord_id != ? AND status = "VERIFIED"
+            ORDER BY timestamp DESC LIMIT 1
+        ''', (guild_id, ip_address, current_discord_id))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result[0] if result else None
+
+    async def handle_ip_ban_attempt(self, guild: discord.Guild, discord_id: str, ip_address: str):
+        """Handle attempt to verify with banned IP"""
+        try:
+            member = guild.get_member(int(discord_id))
+            
+            # Get ban info
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT banned_user_name, reason FROM ip_bans 
+                WHERE guild_id = ? AND ip_address = ?
+            ''', (guild.id, ip_address))
+            
+            ban_info = cursor.fetchone()
+            conn.close()
+            
+            banned_user_name, reason = ban_info if ban_info else ("Unknown", "IP banned")
+            
+            # Try to kick the user
+            if member:
+                try:
+                    await member.kick(reason=f"Banned IP attempt: {ip_address}")
+                    action_taken = "User kicked automatically"
+                except discord.Forbidden:
+                    action_taken = "Unable to kick user (insufficient permissions)"
+                except discord.HTTPException:
+                    action_taken = "Failed to kick user"
+            else:
+                action_taken = "User not found in server"
+            
+            # Log the attempt
+            await self.log_ip_ban_event(guild, member, ip_address, f"Banned IP verification attempt - Original ban: {reason}", None, "BLOCKED_ATTEMPT")
+            
+            logger.info(f"Blocked banned IP verification attempt: {discord_id} using IP {ip_address} in guild {guild.id}")
+            
+        except Exception as e:
+            logger.error(f"Error handling IP ban attempt: {e}")
+
+    async def handle_ip_duplicate_detection(self, guild: discord.Guild, new_discord_id: str, 
+                                          existing_discord_id: str, ip_address: str):
+        """Handle duplicate IP detection"""
+        try:
+            new_member = guild.get_member(int(new_discord_id))
+            existing_member = guild.get_member(int(existing_discord_id))
+            
+            # Get server settings
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                'SELECT auto_kick, log_channel FROM server_settings WHERE guild_id = ?',
+                (guild.id,)
+            )
+            result = cursor.fetchone()
+            conn.close()
+            
+            auto_kick, log_channel_id = result if result else (True, None)
+            
+            # Create log embed
+            embed = discord.Embed(
+                title="🚨 Duplicate IP Detected",
+                description="Same IP address detected for multiple accounts",
+                color=0xff9900,  # Orange for IP duplicates (less severe than HWID)
+                timestamp=datetime.datetime.now()
+            )
+            
+            embed.add_field(
+                name="👤 New Account",
+                value=f"{new_member.mention if new_member else 'Unknown'} ({new_discord_id})",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="👤 Existing Account", 
+                value=f"{existing_member.mention if existing_member else 'Unknown'} ({existing_discord_id})",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🌐 IP Address",
+                value=f"`{ip_address}`",
+                inline=True
+            )
+            
+            # Auto-kick if enabled
+            if auto_kick and new_member:
+                try:
+                    await new_member.kick(reason="Duplicate IP detected")
+                    embed.add_field(
+                        name="⚡ Action Taken",
+                        value="User automatically kicked",
+                        inline=False
+                    )
+                except discord.Forbidden:
+                    embed.add_field(
+                        name="❌ Action Failed",
+                        value="Unable to kick user (insufficient permissions)",
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name="⚠️ Action Required",
+                    value="Manual review recommended",
+                    inline=False
+                )
+            
+            # Send to log channel
+            if log_channel_id:
+                log_channel = guild.get_channel(log_channel_id)
+                if log_channel:
+                    await log_channel.send(embed=embed)
+            
+            logger.info(f"Duplicate IP detected in guild {guild.id}: {new_discord_id} matches {existing_discord_id} (IP: {ip_address})")
+            
+        except Exception as e:
+            logger.error(f"Error handling IP duplicate detection: {e}")
+
+    async def log_ip_ban_event(self, guild: discord.Guild, user, ip_address: str, reason: str, banned_by, event_type: str):
+        """Log IP ban events to the designated channel"""
+        try:
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                'SELECT log_channel FROM server_settings WHERE guild_id = ?',
+                (guild.id,)
+            )
+            result = cursor.fetchone()
+            conn.close()
+            
+            if not result or not result[0]:
+                return
+            
+            log_channel = guild.get_channel(result[0])
+            if not log_channel:
+                return
+            
+            embed = discord.Embed(
+                title=f"🚫 IP Ban Event: {event_type}",
+                timestamp=datetime.datetime.now()
+            )
+            
+            if event_type == 'BANNED':
+                embed.color = 0xff0000
+                embed.add_field(
+                    name="👤 User Banned",
+                    value=f"{user.mention if user else 'Unknown'} ({user.id if user else 'Unknown'})",
+                    inline=True
+                )
+                embed.add_field(
+                    name="👮 Banned By",
+                    value=f"{banned_by.mention if banned_by else 'System'}",
+                    inline=True
+                )
+            else:
+                embed.color = 0xff9900
+                embed.add_field(
+                    name="🚨 Blocked Attempt",
+                    value=f"User: {user.mention if user else 'Unknown'}",
+                    inline=True
+                )
+            
+            embed.add_field(
+                name="🌐 IP Address",
+                value=f"`{ip_address}`",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="📝 Reason",
+                value=reason,
+                inline=False
+            )
+            
+            await log_channel.send(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Error logging IP ban event: {e}")
 
     async def check_duplicate_hwid(self, guild_id: int, hwid: str, current_discord_id: str) -> Optional[str]:
         """Check if HWID already exists for a different user"""
